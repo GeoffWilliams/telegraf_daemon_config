@@ -155,11 +155,6 @@ def logging_hook(response, *args, **kwargs):
     data = dump.dump_all(response)
     print(data.decode('utf-8'))
 
-def get_cc_connectors(environment_id, kafka_cluster_id, verbose):
-    return http_cc_get_json(
-        f"https://api.confluent.cloud/connect/v1/environments/{environment_id}/clusters/{kafka_cluster_id}/connectors?expand=id",
-        verbose
-    )
 
 def get_connector_metrics_urls(environment_id, kafka_cluster_id, verbose):
     """Get the metrics URL for every connector the database knows about in this cluster"""
@@ -170,7 +165,10 @@ def get_connector_metrics_urls(environment_id, kafka_cluster_id, verbose):
 
     # ask CC for all the connectors in the environment (this is the only way to get the connector ID) 
     # (dict of connector name -> info)
-    cc_connector_info = get_cc_connectors(environment_id, kafka_cluster_id, verbose)
+    cc_connector_info = http_cc_get_json(
+        f"https://api.confluent.cloud/connect/v1/environments/{environment_id}/clusters/{kafka_cluster_id}/connectors?expand=id",
+        verbose
+    )
 
     # munge the two lists together to get a connector metrics URL, we always generate a metrics URL for every
     # connector found in the database so that we can see that the connector is missing
@@ -181,7 +179,7 @@ def get_connector_metrics_urls(environment_id, kafka_cluster_id, verbose):
 
     return connector_urls
 
-def extract_ksql_id_from_url(cluster_info, kafka_cluster_id):
+def extract_id_from_metadata(cluster_info, kafka_cluster_id):
     """
     1:  The `.data.id` field in starts `dlz-` but we must extract the id starting `lksqlc-` which is in 
         the `.data.metadata.self`.
@@ -194,16 +192,18 @@ def extract_ksql_id_from_url(cluster_info, kafka_cluster_id):
     self_url = cluster_info.get("metadata", {}).get("self", "")
     p = urlparse(self_url)
     # item after the last `/` is the cluster id
-    ksql_cluster_id = p.path.split('/')[-1]
+    id = p.path.split('/')[-1]
     
-    # check kafka cluster
-    ksql_kafka_cluster = cluster_info.get("spec", {}).get("kafka_cluster", {}).get("id", False)
-    if ksql_kafka_cluster == kafka_cluster_id:
-        result = ksql_cluster_id
+    # filter the kafka cluster id if requested
+    if kafka_cluster_id:
+        ksql_kafka_cluster = cluster_info.get("spec", {}).get("kafka_cluster", {}).get("id", False)
+        if ksql_kafka_cluster == kafka_cluster_id:
+            result = id
+        else:
+            L.debug(f"skipped ksql cluster: {id} - {ksql_kafka_cluster} is not part of kafka cluster: {kafka_cluster_id}")
+            result = False
     else:
-        L.debug(f"skipped ksql cluster: {ksql_cluster_id} - {ksql_kafka_cluster} is not part of kafka cluster: {kafka_cluster_id}")
-        result = False
-
+        result = id
     return result
 
 
@@ -222,7 +222,7 @@ def get_ksql_metrics_urls(environment_id, kafka_cluster_id, verbose):
         # `data` will be None if no ksql clusters are defined
         for cluster_info in response_json_data:
             # filter only the kafka cluster we are looking at
-            ksql_cluster_id = extract_ksql_id_from_url(cluster_info, kafka_cluster_id)
+            ksql_cluster_id = extract_id_from_metadata(cluster_info, kafka_cluster_id)
             if ksql_cluster_id:
                 ksql_metrics_urls.append(f"{METRICS_ENDPOINT}resource.ksql.id={ksql_cluster_id}")
 
@@ -236,14 +236,29 @@ def get_ksql_metrics_urls(environment_id, kafka_cluster_id, verbose):
             response_json_data = response_json.get("data")
             if response_json_data:
                 for cluster_info in response_json_data:
-                    ksql_cluster_id = extract_ksql_id_from_url(cluster_info, kafka_cluster_id)
+                    ksql_cluster_id = extract_id_from_metadata(cluster_info, kafka_cluster_id)
                     if ksql_cluster_id:
                         ksql_metrics_urls.append(f"{METRICS_ENDPOINT}resource.ksql.id={ksql_cluster_id}")
 
     return ksql_metrics_urls
 
-def get_schema_registry_metrics_urls(environment_id, kafka_cluster_id, verbose):
-    return []
+def get_schema_registry_metrics_urls(environment_id, _, verbose):
+    """schema registries are added 1:1 with environments so cluster filtering not applicable"""
+    response_json = http_cc_get_json(
+        f"https://api.confluent.cloud/srcm/v2/clusters?environment={environment_id}",
+        verbose
+    )
+
+    # `data` should be a list of 0 or 1 entries describing schema registry clusters (0 if you have not
+    # enabled for this environment)
+    sr_clusters = response_json.get("data", [])
+    if len(sr_clusters):
+        sr_cluster_id = extract_id_from_metadata(sr_clusters[0], False)
+        result = [f"{METRICS_ENDPOINT}resource.schema_registry.id={sr_cluster_id}"]
+    else:
+        result = []
+
+    return result    
 
 def get_cc_connector_ids_from_name(environment_id, kafka_cluster_id, connector_name, verbose):
     http = requests.Session()
