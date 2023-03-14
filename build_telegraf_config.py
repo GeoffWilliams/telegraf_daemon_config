@@ -8,8 +8,10 @@ Enumerate metrics service URLs for:
 
 Environment variables
 =====================
-CONFLUENT_CLOUD_API_KEY
-CONFLUENT_CLOUD_API_SECRET
+TF_VAR_CC_API_KEY
+TF_VAR_CC_API_SECRET
+TF_VAR_DB_URL_SECRET
+
 """
 from psycopg.rows import dict_row
 import requests
