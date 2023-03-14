@@ -24,9 +24,14 @@ from urllib.parse import urlparse
 import sys
 import os
 from jinja2 import Environment
+import subprocess
+from time import strftime, gmtime, time, sleep
+import fcntl
+
 
 L = logging.getLogger(__name__)
 METRICS_ENDPOINT = "https://api.telemetry.confluent.cloud/v2/metrics/cloud/export?"
+TELEGRAF_CONFIG_FILE = "/tmp/telegraf.conf"
 
 CONFIG_TEMPLATE = """
 ###############################################################################
@@ -297,8 +302,60 @@ def render_template(environment_id, kafka_cluster_id, verbose):
         # connectors
         *get_connector_metrics_urls(environment_id, kafka_cluster_id, verbose)
     ]
-    print(template.render(metrics_urls=metrics_urls))
+    return template.render(metrics_urls=metrics_urls)
 
+
+def write_config_file(environment_id, kafka_cluster_id, verbose):
+    # build a fresh config file...
+    config_file = render_template(environment_id, kafka_cluster_id, verbose)
+
+    # ...write it out to /tmp somewhere (guaranteed writable)
+    with open(TELEGRAF_CONFIG_FILE, "w") as f:
+        f.write(config_file)
+    
+    # ... show to the user
+    print(f"# config file rewritten at {strftime('%Y-%m-%dT%H:%M:%SZ', gmtime())}")
+
+def non_block_read(output):
+    fd = output.fileno()
+    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+    try:
+        return output.read()
+    except:
+        return ''
+    
+def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
+    
+    # initial config file
+    write_config_file(environment_id, kafka_cluster_id, verbose)
+    while True:
+        start_time = time()
+        # run telegraf agent with the config file in /tmp and STDOUT, STDERR output from this process,
+        # after the ttl has lapsed, rebuild the config file and restart the telegraf process
+        # based on https://stackoverflow.com/a/3626858/3441106
+        cmd = [ "telegraf", "--config", TELEGRAF_CONFIG_FILE]
+        seconds_passed = 0
+        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as p:
+            while p.poll() is None and seconds_passed < config_ttl:
+                sleep(0.1) # Wait a little
+                seconds_passed = time() - start_time
+
+                # p.std* blocks on read(), which messes up the timeout timer.
+                # To fix this, we use a nonblocking read()
+                output = non_block_read(p.stdout)
+                if output:
+                    print(output)
+
+            # reload the config and loop
+            if time() - start_time > config_ttl:
+                print("# config expired, reloading")
+                write_config_file(environment_id, kafka_cluster_id, verbose)
+                try:
+                    p.stdout.close()  # If they are not closed the fds will hang around until
+                    p.terminate()
+                except:
+                    pass
 
 
 def main():
@@ -307,6 +364,8 @@ def main():
     parser.add_argument('--kafka-cluster-id', dest='kafka_cluster_id', help="Cluster ID to get limits from, eg lkc-w9ykm")
     parser.add_argument('--verbose', dest='verbose', default=False, action='store_true', help="Print debug info")
     parser.add_argument('--test-postgres', dest='test_postgres', default=False, action='store_true', help="Test connection to Postgres, then exit")
+    parser.add_argument('--daemon', dest='daemon', default=False, action='store_true', help="Enter daemon mode")
+    parser.add_argument('--config-ttl', dest='config_ttl', default=60, help="How often to rebuild the config (seconds)")
 
     args = parser.parse_args()
 
@@ -317,15 +376,17 @@ def main():
         with get_postgres_connection(os.environ['TF_VAR_DB_URL_SECRET']) as conn:
             if len(conn.execute("SELECT 1").fetchall()):
                 print("OK")
+    elif not args.environment_id:
+        print ("must supply --environment-id")
+        sys.exit(1)
+    elif not args.kafka_cluster_id:
+        print ("must supply --kafka-cluster-id")
+        sys.exit(1)
+    elif args.daemon:
+        daemon(args.environment_id, args.kafka_cluster_id, args.config_ttl, args.verbose)
     else:
-        if not args.environment_id:
-            print ("must supply --environment-id")
-            sys.exit(1)
-        if not args.kafka_cluster_id:
-            print ("must supply --kafka-cluster-id")
-            sys.exit(1)
-        
-        render_template(args.environment_id, args.kafka_cluster_id, args.verbose)
+        # print and exit
+        print(render_template(args.environment_id, args.kafka_cluster_id, args.verbose))
 
     
 if __name__ == "__main__":
