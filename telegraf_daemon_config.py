@@ -101,7 +101,7 @@ files = ["stdout"]
 region = "${AWS_REGION}"
 # Amazon Credentials are via STS
 namespace = "InfluxData/Telegraf"
-role_arn = ${AWS_ROLE_ARN}
+role_arn = "${AWS_ROLE_ARN}"
 # write_statistics = false
 # high_resolution_metrics = false
 
