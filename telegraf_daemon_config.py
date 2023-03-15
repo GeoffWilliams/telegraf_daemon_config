@@ -8,9 +8,22 @@ Enumerate metrics service URLs for:
 
 Environment variables
 =====================
-TF_VAR_CC_API_KEY
-TF_VAR_CC_API_SECRET
-TF_VAR_DB_URL_SECRET
+
+Query the confluent cloud API for cluster names, etc
+    TF_VAR_CC_API_KEY
+    TF_VAR_CC_API_SECRET
+
+Query the database for connector names:
+    TF_VAR_DB_URL_SECRET
+
+Query the Confluent Cloud metrics API. Separate credential for added security 
+via principle of least privilege if needed)
+    CCLOUD_METRICS_API_KEY
+    CCLOUD_METRICS_API_SECRET
+
+CloudWatch (rest of credentials via STS):
+    AWS_REGION
+    AWS_ROLE_ARN
 
 """
 from psycopg.rows import dict_row
@@ -27,6 +40,7 @@ from jinja2 import Environment
 import subprocess
 from time import strftime, gmtime, time, sleep
 import fcntl
+import traceback
 
 
 L = logging.getLogger(__name__)
@@ -83,6 +97,13 @@ password = "${CCLOUD_METRICS_API_SECRET}"
 [[outputs.file]]
 files = ["stdout"]
 
+[[outputs.cloudwatch]]
+region = "${AWS_REGION}"
+# Amazon Credentials are via STS
+namespace = "InfluxData/Telegraf"
+role_arn = ${AWS_ROLE_ARN}
+# write_statistics = false
+# high_resolution_metrics = false
 
 ###############################################################################
 #                      Examples/Other useful plugins                          #
@@ -306,15 +327,23 @@ def render_template(environment_id, kafka_cluster_id, verbose):
 
 
 def write_config_file(environment_id, kafka_cluster_id, verbose):
-    # build a fresh config file...
-    config_file = render_template(environment_id, kafka_cluster_id, verbose)
+    try:
+        # build a fresh config file...
+        config_file = render_template(environment_id, kafka_cluster_id, verbose)
 
-    # ...write it out to /tmp somewhere (guaranteed writable)
-    with open(TELEGRAF_CONFIG_FILE, "w") as f:
-        f.write(config_file)
-    
-    # ... show to the user
-    print(f"# config file rewritten at {strftime('%Y-%m-%dT%H:%M:%SZ', gmtime())}")
+        # ...write it out to /tmp somewhere (guaranteed writable)
+        with open(TELEGRAF_CONFIG_FILE, "w") as f:
+            f.write(config_file)
+        
+        # ... show to the user
+        print(f"# config file rewritten at {strftime('%Y-%m-%dT%H:%M:%SZ', gmtime())}")
+        print(config_file)
+        safe_to_reload = True
+    except:
+        L.error("Excepting generating/writing config! stacktrace follows:")
+        traceback.print_exc()
+        safe_to_reload = False
+    return safe_to_reload
 
 def non_block_read(output):
     fd = output.fileno()
@@ -327,9 +356,15 @@ def non_block_read(output):
     
 def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
     
-    # initial config file
-    write_config_file(environment_id, kafka_cluster_id, verbose)
+    # write the initial config file. If we get errors retry after our own delay, this is set here
+    # to our own value so that if we have a config_ttl of hours/days we are not waiting that long
+    # with not telegraf agent running
+    error_backoff = 60
+    while not write_config_file(environment_id, kafka_cluster_id, verbose):
+        L.error("Failed to write initial config file, cannot start telegraf agent. retry in {error_backoff} seconds")
+        sleep(error_backoff)
     while True:
+        L.info("(re)starting telegraf agent")
         start_time = time()
         # run telegraf agent with the config file in /tmp and STDOUT, STDERR output from this process,
         # after the ttl has lapsed, rebuild the config file and restart the telegraf process
@@ -347,15 +382,31 @@ def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
                 if output:
                     print(output)
 
+            if p.poll():
+                L.error(f"telgraf process has exited (bad config?) - restarting telegraf agent in {error_backoff} seconds")
+                # sleep to avoid CPU sucking loop
+                sleep(error_backoff)
+
             # reload the config and loop
             if time() - start_time > config_ttl:
-                print("# config expired, reloading")
-                write_config_file(environment_id, kafka_cluster_id, verbose)
-                try:
-                    p.stdout.close()  # If they are not closed the fds will hang around until
-                    p.terminate()
-                except:
-                    pass
+                print("# config expired, attempting to rebuild")
+                safe_to_reload = write_config_file(environment_id, kafka_cluster_id, verbose)
+                if safe_to_reload:
+                    try:
+                        p.stdout.close()  # If they are not closed the fds will hang around until
+                    except:
+                        pass
+
+                    # we must try to kill telegraf process even if closing STDOUT failed...
+                    try:
+                        p.terminate()
+                        L.info("Telegraf agent terminated")
+                    except:
+                        L.warning("Failed to terminate telegraf agent, will try to start it again")
+                        traceback.print_exc()
+                else:
+                    L.error("Rebuilding config file failed, not restarting. . Will attempt rebuild again in {config_ttl} seconds")
+
 
 
 def main():
@@ -365,7 +416,7 @@ def main():
     parser.add_argument('--verbose', dest='verbose', default=False, action='store_true', help="Print debug info")
     parser.add_argument('--test-postgres', dest='test_postgres', default=False, action='store_true', help="Test connection to Postgres, then exit")
     parser.add_argument('--daemon', dest='daemon', default=False, action='store_true', help="Enter daemon mode")
-    parser.add_argument('--config-ttl', dest='config_ttl', default=60, help="How often to rebuild the config (seconds)")
+    parser.add_argument('--config-ttl', dest='config_ttl', default=60, type=int, help="How often to rebuild the config (seconds)")
 
     args = parser.parse_args()
 
