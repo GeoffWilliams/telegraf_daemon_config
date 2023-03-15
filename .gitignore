@@ -1,2 +1,8 @@
+# venv
 env
+
+# docker settings
+.env
+
+# stray config files
 telegraf.conf

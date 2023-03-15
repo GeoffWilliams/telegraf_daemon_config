@@ -23,7 +23,7 @@ via principle of least privilege if needed)
 
 CloudWatch (rest of credentials via STS):
     AWS_REGION
-    AWS_ROLE_ARN
+    AWS_CLOUDWATCH_NAMESPACE
 
 """
 from psycopg.rows import dict_row
@@ -99,12 +99,8 @@ files = ["stdout"]
 
 [[outputs.cloudwatch]]
 region = "${AWS_REGION}"
-# Amazon Credentials are via STS
-namespace = "InfluxData/Telegraf"
-#access_key = "${AWS_ACCESS_KEY}"
-#secret_key = "${AWS_SECRET_ACCESS_KEY}"
-#token = "${AWS_TOKEN}"
-#role_arn = "${AWS_ROLE_ARN}"
+# Amazon Credentials are via STS (check terraform or how you are configuring the ECS task)
+namespace = "${AWS_CLOUDWATCH_NAMESPACE}"
 # write_statistics = false
 # high_resolution_metrics = false
 
@@ -357,38 +353,6 @@ def non_block_read(output):
     except:
         return ''
     
-def update_aws_credentials_in_environment():
-    """telegraf AWS credentials don't seem to be resolved correctly - always get failed to sign request: 
-    failed to retrieve credentials: failed to refresh cached credentials, no EC2 IMDS role found, 
-    operation error ec2imds: GetMetadata, request canceled
-    
-    However, manually setting access_key, secret_key, token seems to work
-    """
-    if "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" in os.environ:
-        L.debug("detected we are running on ECS with execution role")
-        response = requests.get(f"http://192.0.2.0/{os.environ['AWS_CONTAINER_CREDENTIALS_RELATIVE_URI']}")
-        if response.ok():
-            response_json = response.json()
-            os.environ['AWS_ROLE_ARN'] = response_json.get("RoleArn", "")
-            os.environ['AWS_ACCESS_KEY'] = response_json.get("AccessKeyId", "")
-            os.environ['AWS_SECRET_ACCESS_KEY'] = response_json.get("SecretAccessKey", "")
-            os.environ['AWS_TOKEN'] = response_json.get("Token", "")
-
-            if (len(os.environ['AWS_ROLE_ARN']) and len(os.environ['AWS_ACCESS_KEY'])
-                and len(os.environ['AWS_SECRET_ACCESS_KEY']) and len(os.environ['AWS_TOKEN'])):
-                L.debug("AWS credentials parse OK")
-            else:
-                L.warning("Failed to parse some or all AWS credentials")
-                
-                # probably safe-ish to output these since they are limited in scope and also broken/missing
-                L.debug(f"""AWS credentials: 
-                    AWS_ROLE_ARN={os.environ['AWS_ROLE_ARN']}
-                    AWS_ACCESS_KEY={os.environ['AWS_ACCESS_KEY']}
-                    AWS_SECRET_ACCESS_KEY={os.environ['AWS_SECRET_ACCESS_KEY']}
-                    AWS_TOKEN={os.environ['AWS_TOKEN']}
-                """)
-    else:
-        L.warning("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI not set! Are we running in ECS with task_role_arn set?")
     
 def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
     L.debug("starting daemon mode")
@@ -397,12 +361,7 @@ def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
         L.error("Failed to write initial config file, cannot start telegraf agent. retry in {error_backoff} seconds")
         sys.exit(1)
     while True:
-        print("(re)starting telegraf agent")
-
-        # always try to refresh the AWS credentials first - these are only good for maximum 6 hours
-        # ref: https://docs.aws.amazon.com/AmazonECS/latest/bestpracticesguide/security-iam-roles.html
-        #update_aws_credentials_in_environment()
-
+        print(f"(re)starting telegraf agent, will restart after {config_ttl}s")
         start_time = time()
         # run telegraf agent with the config file in /tmp and STDOUT, STDERR output from this process,
         # after the ttl has lapsed, rebuild the config file and restart the telegraf process
