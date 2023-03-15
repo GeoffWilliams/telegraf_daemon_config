@@ -148,6 +148,7 @@ def http_cc_get_json(url, verbose):
     response = http.get(
         url,
         auth=HTTPBasicAuth(os.environ['TF_VAR_CC_API_KEY'],os.environ['TF_VAR_CC_API_SECRET']),
+        timeout=10
     )
 
     return response.json()

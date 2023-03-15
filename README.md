@@ -8,7 +8,7 @@
 * main script contains the config file template for ease of editing
 * rebuilt config file is output on reload
 
-## Quickstart
+## Quickstart (dynamic)
 
 1. Clone this repository locally
 2. Create ECR repository in AWS
@@ -26,6 +26,27 @@ make
 ```
 
 5. Edit and run [examples/terraform.tf](examples/terraform.tf) to define cloudwatch log group (for container logs) ECS cluster, service and task definition. Secrets defined are for example (and you wouldn't want your secrets in git) - make the corresponding secrets via clickops and reference the ARNs in the task definition
+
+## Quickstart (static)
+
+As a fallback, you can dump config file locally and include it in a static image:
+
+```
+# collect pips into a venv
+python -m venv env
+. env/bin/activate
+pip install -r requirements.txt
+
+export TF_VAR_CC_API_KEY=$CONFLUENT_CLOUD_API_KEY
+export TF_VAR_CC_API_SECRET=$CONFLUENT_CLOUD_API_SECRET
+export TF_VAR_DB_URL_SECRET=postgresql://terraform_cloud_confluent:xxx@192.168.4.7:5432/postgres
+./telegraf_daemon_config.py --environment-id env-xxxxxx --kafka-cluster-id lkc-zzzzzz > telegraf.conf
+make static
+```
+
+> **Warning**
+> This replaces any current dynamic image!
+
 
 ## Troubleshooting
 
