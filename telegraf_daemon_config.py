@@ -356,15 +356,12 @@ def non_block_read(output):
     
 def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
     
-    # write the initial config file. If we get errors retry after our own delay, this is set here
-    # to our own value so that if we have a config_ttl of hours/days we are not waiting that long
-    # with not telegraf agent running
-    error_backoff = 60
+    # write the initial config file. If we get errors at this stage we should kill ourself for visibility
     while not write_config_file(environment_id, kafka_cluster_id, verbose):
         L.error("Failed to write initial config file, cannot start telegraf agent. retry in {error_backoff} seconds")
-        sleep(error_backoff)
+        sys.exit(1)
     while True:
-        L.info("(re)starting telegraf agent")
+        print("(re)starting telegraf agent")
         start_time = time()
         # run telegraf agent with the config file in /tmp and STDOUT, STDERR output from this process,
         # after the ttl has lapsed, rebuild the config file and restart the telegraf process
@@ -372,6 +369,8 @@ def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
         cmd = [ "telegraf", "--config", TELEGRAF_CONFIG_FILE]
         seconds_passed = 0
         with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as p:
+            # give process time to self-error without entering loop (eg for bad config)
+            sleep(1)
             while p.poll() is None and seconds_passed < config_ttl:
                 sleep(0.1) # Wait a little
                 seconds_passed = time() - start_time
@@ -382,15 +381,10 @@ def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
                 if output:
                     print(output)
 
-            if p.poll():
-                L.error(f"telgraf process has exited (bad config?) - restarting telegraf agent in {error_backoff} seconds")
-                # sleep to avoid CPU sucking loop
-                sleep(error_backoff)
-
-            # reload the config and loop
-            if time() - start_time > config_ttl:
-                print("# config expired, attempting to rebuild")
-                safe_to_reload = write_config_file(environment_id, kafka_cluster_id, verbose)
+            if p.poll() is None:
+                # telegraf still running, config is old
+                L.info("# config expired, attempting to rebuild")
+                safe_to_reload = write_config_file(1,2,3)
                 if safe_to_reload:
                     try:
                         p.stdout.close()  # If they are not closed the fds will hang around until
@@ -402,11 +396,18 @@ def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
                         p.terminate()
                         L.info("Telegraf agent terminated")
                     except:
-                        L.warning("Failed to terminate telegraf agent, will try to start it again")
-                        traceback.print_exc()
+                        L.error("Failed to terminate telegraf agent! exit container")
+                        sys.exit(1)
                 else:
                     L.error("Rebuilding config file failed, not restarting. . Will attempt rebuild again in {config_ttl} seconds")
+            else:
+                # print any straggling output (eg if we didnt enter while loop due to immediate error)
+                output = non_block_read(p.stdout)
+                if output:
+                    print(output)
 
+                L.error(f"telgraf process has exited (return code: {p.poll()}")
+                sys.exit(1)
 
 
 def main():
@@ -420,7 +421,7 @@ def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING, stream=sys.stdout)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, stream=sys.stdout)
     L.debug(args)
 
     if args.test_postgres:
