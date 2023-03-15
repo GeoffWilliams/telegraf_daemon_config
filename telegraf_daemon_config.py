@@ -101,7 +101,10 @@ files = ["stdout"]
 region = "${AWS_REGION}"
 # Amazon Credentials are via STS
 namespace = "InfluxData/Telegraf"
-role_arn = "${AWS_ROLE_ARN}"
+access_key = "${AWS_ACCESS_KEY}"
+secret_key = "${AWS_SECRET_KEY}"
+token = "${AWS_TOKEN}"
+#role_arn = "${AWS_ROLE_ARN}"
 # write_statistics = false
 # high_resolution_metrics = false
 
@@ -355,7 +358,7 @@ def non_block_read(output):
         return ''
     
 def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
-    
+    L.debug("starting daemon mode")
     # write the initial config file. If we get errors at this stage we should kill ourself for visibility
     while not write_config_file(environment_id, kafka_cluster_id, verbose):
         L.error("Failed to write initial config file, cannot start telegraf agent. retry in {error_backoff} seconds")
@@ -373,6 +376,7 @@ def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
             sleep(1)
             while p.poll() is None and seconds_passed < config_ttl:
                 sleep(0.1) # Wait a little
+                L.debug("poll telegraf process inside loop")
                 seconds_passed = time() - start_time
 
                 # p.std* blocks on read(), which messes up the timeout timer.
@@ -383,8 +387,8 @@ def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
 
             if p.poll() is None:
                 # telegraf still running, config is old
-                L.info("# config expired, attempting to rebuild")
-                safe_to_reload = write_config_file(1,2,3)
+                L.info(f"config expired ({seconds_passed}s > {config_ttl}s), attempting to rebuild")
+                safe_to_reload = write_config_file(environment_id, kafka_cluster_id, verbose)
                 if safe_to_reload:
                     try:
                         p.stdout.close()  # If they are not closed the fds will hang around until
@@ -394,7 +398,7 @@ def daemon(environment_id, kafka_cluster_id, config_ttl, verbose):
                     # we must try to kill telegraf process even if closing STDOUT failed...
                     try:
                         p.terminate()
-                        L.info("Telegraf agent terminated")
+                        L.info("Telegraf agent terminated OK")
                     except:
                         L.error("Failed to terminate telegraf agent! exit container")
                         sys.exit(1)
@@ -417,7 +421,7 @@ def main():
     parser.add_argument('--verbose', dest='verbose', default=False, action='store_true', help="Print debug info")
     parser.add_argument('--test-postgres', dest='test_postgres', default=False, action='store_true', help="Test connection to Postgres, then exit")
     parser.add_argument('--daemon', dest='daemon', default=False, action='store_true', help="Enter daemon mode")
-    parser.add_argument('--config-ttl', dest='config_ttl', default=60, type=int, help="How often to rebuild the config (seconds)")
+    parser.add_argument('--config-ttl', dest='config_ttl', default=300, type=int, help="How often to rebuild the config (seconds)")
 
     args = parser.parse_args()
 
